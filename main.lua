@@ -1,5 +1,6 @@
 --[[
     UnitedUI (imgui / unity inspired)
+    Transparent dark grey style + tabs + containers (1/2/4)
 ]]
 
 local UI = {}
@@ -658,7 +659,8 @@ local function createElementAPI(targetScroll, connectFn)
         })
 
         local btn = make("TextButton", {
-            Size = UDim2.new(1, 0, 0, 24),
+            Size = UDim2.new(1, -2, 0, 24),
+            Position = UDim2.new(0, 1, 0, 0),
             BackgroundColor3 = C.Button,
             BackgroundTransparency = 0.14,
             BorderSizePixel = 0,
@@ -688,8 +690,8 @@ local function createElementAPI(targetScroll, connectFn)
         })
 
         local list = make("Frame", {
-            Size = UDim2.new(1, 0, 0, 0),
-            Position = UDim2.new(0, 0, 0, 24),
+            Size = UDim2.new(1, -2, 0, 0),
+            Position = UDim2.new(0, 1, 0, 24),
             BackgroundColor3 = C.Input,
             BackgroundTransparency = 0.05,
             BorderSizePixel = 0,
@@ -765,11 +767,11 @@ local function createElementAPI(targetScroll, connectFn)
             if open then
                 local targetH = math.max(0, lay.AbsoluteContentSize.Y + 8)
                 list.Visible = true
-                tween(list, 0.12, {Size = UDim2.new(1, 0, 0, targetH)})
+                tween(list, 0.12, {Size = UDim2.new(1, -2, 0, targetH)})
                 tween(wrap, 0.12, {Size = UDim2.new(1, 0, 0, 24 + targetH)})
                 icon.Text = "^"
             else
-                tween(list, 0.10, {Size = UDim2.new(1, 0, 0, 0)})
+                tween(list, 0.10, {Size = UDim2.new(1, -2, 0, 0)})
                 tween(wrap, 0.10, {Size = UDim2.new(1, 0, 0, 24)})
                 icon.Text = "v"
                 task.delay(0.11, function()
@@ -832,7 +834,8 @@ local function createElementAPI(targetScroll, connectFn)
             ClipsDescendants = true,
         })
         local btn = make("TextButton", {
-            Size = UDim2.new(1, 0, 0, 24),
+            Size = UDim2.new(1, -2, 0, 24),
+            Position = UDim2.new(0, 1, 0, 0),
             BackgroundColor3 = C.Button,
             BackgroundTransparency = 0.14,
             BorderSizePixel = 0,
@@ -862,8 +865,8 @@ local function createElementAPI(targetScroll, connectFn)
         })
 
         local list = make("Frame", {
-            Size = UDim2.new(1, 0, 0, 0),
-            Position = UDim2.new(0, 0, 0, 24),
+            Size = UDim2.new(1, -2, 0, 0),
+            Position = UDim2.new(0, 1, 0, 24),
             BackgroundColor3 = C.Input,
             BackgroundTransparency = 0.05,
             BorderSizePixel = 0,
@@ -919,11 +922,11 @@ local function createElementAPI(targetScroll, connectFn)
             if open then
                 local targetH = math.max(0, lay.AbsoluteContentSize.Y + 8)
                 list.Visible = true
-                tween(list, 0.12, {Size = UDim2.new(1, 0, 0, targetH)})
+                tween(list, 0.12, {Size = UDim2.new(1, -2, 0, targetH)})
                 tween(wrap, 0.12, {Size = UDim2.new(1, 0, 0, 24 + targetH)})
                 icon.Text = "^"
             else
-                tween(list, 0.10, {Size = UDim2.new(1, 0, 0, 0)})
+                tween(list, 0.10, {Size = UDim2.new(1, -2, 0, 0)})
                 tween(wrap, 0.10, {Size = UDim2.new(1, 0, 0, 24)})
                 icon.Text = "v"
                 task.delay(0.11, function()
@@ -2053,6 +2056,7 @@ local function createNotificationNow(settings)
         _exiting = false,
     }
 
+    -- New notifications should appear closest to selected corner.
     table.insert(notifByLocation[location], 1, item)
     layoutNotifications(location, true)
     tween(frame, 0.16, {Position = UDim2.new(sideScale, xVisible, 0, frame.Position.Y.Offset)})
@@ -2178,6 +2182,7 @@ function UI.Window(title, width, posX, posY, height, options)
     if blurOffsetYRaw == nil then
         blurOffsetYRaw = options.blurOffsetY
     end
+    -- Default +2 Y aligns blur plane with UI in CoreGui across most executors.
     local blurOffsetY = tonumber(blurOffsetYRaw)
     if blurOffsetY == nil then
         blurOffsetY = 2
@@ -2621,6 +2626,7 @@ function UI.Window(title, width, posX, posY, height, options)
             if ok and blurObject then
                 localWindowBlur = blurObject
             elseif blurOverlay then
+                -- Fallback when UIBlur is unavailable: keep effect local to the window only.
                 blurOverlay.BackgroundTransparency = math.clamp(0.58 - (blurSize / 160), 0.24, 0.58)
                 blurFallbackVisuals = buildPseudoBlurFallback(blurOverlay, blurSize)
             end
@@ -3205,6 +3211,7 @@ function UI.Window(title, width, posX, posY, height, options)
         return tab
     end
 
+    -- Backward compatibility: controls are added to first container of active tab.
     local function ensureDefaultContainer()
         if not win._defaultContainerApi then
             if #win._tabs == 0 then
@@ -3361,6 +3368,7 @@ function UI.Window(title, width, posX, posY, height, options)
         end
     end
 
+    -- Legacy Toolbar -> maps to tabs and returns old-like API.
     function win:Toolbar(tabNames, callback)
         local created = {}
         for _, n in ipairs(tabNames or {}) do
@@ -3405,6 +3413,7 @@ function UI.Window(title, width, posX, posY, height, options)
         }
     end
 
+    -- Legacy Grid: rendered as rows of buttons in current container.
     function win:Grid(columns, items)
         columns = math.max(columns or 1, 1)
         local api = ensureDefaultContainer()
