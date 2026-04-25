@@ -1,6 +1,5 @@
 --[[
     UnitedUI (imgui / unity inspired)
-    Transparent dark grey style + tabs + containers (1/2/4)
 ]]
 
 local UI = {}
@@ -12,6 +11,7 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local CoreGui = game:GetService("CoreGui")
 local Lighting = game:GetService("Lighting")
+local GuiService = game:GetService("GuiService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
@@ -1641,6 +1641,263 @@ local function containerLayoutInfo(count, index)
     return UDim2.new(0.5, -6, 0.5, -6), UDim2.new(0.5, 4, 0.5, 4)
 end
 
+local FRAME_BLUR_STEP_NAME = "UnitedUI_FrameBlurStep"
+local FRAME_BLUR_PART_SIZE = 0.01
+local FRAME_BLUR_PART_TRANSPARENCY = 1 - 1e-7
+local frameBlurManager = {
+    entries = {},
+    effect = nil,
+    bound = false,
+}
+
+local function frameBlurRayPlaneIntersect(planePos, planeNormal, rayOrigin, rayDirection)
+    local n = planeNormal
+    local d = rayDirection
+    local v = rayOrigin - planePos
+
+    local num = (n.X * v.X) + (n.Y * v.Y) + (n.Z * v.Z)
+    local den = (n.X * d.X) + (n.Y * d.Y) + (n.Z * d.Z)
+    if math.abs(den) <= 1e-6 then
+        return rayOrigin
+    end
+
+    local a = -num / den
+    return rayOrigin + (a * rayDirection)
+end
+
+local function frameBlurReadIgnoreGuiInset(frame)
+    local current = frame
+    while current do
+        current = current.Parent
+        if current and current:IsA("ScreenGui") then
+            return current.IgnoreGuiInset == true
+        end
+    end
+    return false
+end
+
+local function frameBlurNormalizeStrength(blurSize)
+    local normalized = math.clamp((tonumber(blurSize) or 16) / 56, 0, 1)
+    local intensity = 0.16 + (normalized * 0.64)
+    local padding = math.clamp(math.floor(6 + (normalized * 14)), 6, 20)
+    return intensity, Vector2.new(padding, padding)
+end
+
+local function frameBlurIsDescendantOf(instance, ancestor)
+    local current = instance
+    while current do
+        if current == ancestor then
+            return true
+        end
+        current = current.Parent
+    end
+    return false
+end
+
+function frameBlurManager:_ensureEffect()
+    if self.effect and self.effect.Parent then
+        return self.effect
+    end
+
+    self.effect = Instance.new("DepthOfFieldEffect")
+    self.effect.Name = "UnitedUI_FrameDoFBlur"
+    self.effect.FarIntensity = 0
+    self.effect.NearIntensity = 0
+    self.effect.FocusDistance = 0.25
+    self.effect.InFocusRadius = 0
+    self.effect.Enabled = true
+    self.effect.Parent = Lighting
+    return self.effect
+end
+
+function frameBlurManager:_unbindIfEmpty()
+    if next(self.entries) ~= nil then
+        return
+    end
+    if self.bound then
+        pcall(function()
+            RunService:UnbindFromRenderStep(FRAME_BLUR_STEP_NAME)
+        end)
+        self.bound = false
+    end
+    if self.effect and self.effect.Parent then
+        self.effect:Destroy()
+    end
+    self.effect = nil
+end
+
+function frameBlurManager:_removeEntry(entry)
+    if not entry or not self.entries[entry] then
+        return
+    end
+
+    self.entries[entry] = nil
+    if entry.part and entry.part.Parent then
+        entry.part:Destroy()
+    end
+    entry.part = nil
+    entry.mesh = nil
+    self:_unbindIfEmpty()
+end
+
+function frameBlurManager:_step()
+    local camera = workspace.CurrentCamera
+    if not camera then
+        return
+    end
+
+    local hasVisible = false
+    local maxIntensity = 0
+    local staleEntries = {}
+
+    for entry in pairs(self.entries) do
+        local frame = entry.frame
+        local part = entry.part
+        local mesh = entry.mesh
+
+        if not frame or not frame.Parent or not part or not mesh then
+            table.insert(staleEntries, entry)
+        elseif not entry.enabled or not frame.Visible then
+            part.Transparency = 1
+        else
+            if part.Parent ~= camera then
+                part.Parent = camera
+            end
+            part.CFrame = camera.CFrame
+            part.Transparency = FRAME_BLUR_PART_TRANSPARENCY
+
+            local corner0 = frame.AbsolutePosition + entry.padding + entry.manualOffset
+            local corner1 = corner0 + frame.AbsoluteSize - (entry.padding * 2)
+            if entry.coreGuiInsetCompensation then
+                local insetTopLeft = select(1, GuiService:GetGuiInset())
+                corner0 += insetTopLeft
+                corner1 += insetTopLeft
+            end
+
+            if corner1.X <= corner0.X or corner1.Y <= corner0.Y then
+                part.Transparency = 1
+            else
+                local ray0, ray1
+                if entry.ignoreGuiInset then
+                    ray0 = camera:ViewportPointToRay(corner0.X, corner0.Y, 1)
+                    ray1 = camera:ViewportPointToRay(corner1.X, corner1.Y, 1)
+                else
+                    ray0 = camera:ScreenPointToRay(corner0.X, corner0.Y, 1)
+                    ray1 = camera:ScreenPointToRay(corner1.X, corner1.Y, 1)
+                end
+
+                local planeOrigin = camera.CFrame.Position + (camera.CFrame.LookVector * (0.05 - camera.NearPlaneZ))
+                local planeNormal = camera.CFrame.LookVector
+                local pos0 = frameBlurRayPlaneIntersect(planeOrigin, planeNormal, ray0.Origin, ray0.Direction)
+                local pos1 = frameBlurRayPlaneIntersect(planeOrigin, planeNormal, ray1.Origin, ray1.Direction)
+
+                pos0 = camera.CFrame:PointToObjectSpace(pos0)
+                pos1 = camera.CFrame:PointToObjectSpace(pos1)
+
+                local size = pos1 - pos0
+                local center = (pos0 + pos1) / 2
+
+                mesh.Offset = center
+                mesh.Scale = size / FRAME_BLUR_PART_SIZE
+
+                hasVisible = true
+                if entry.intensity > maxIntensity then
+                    maxIntensity = entry.intensity
+                end
+            end
+        end
+    end
+
+    for i = 1, #staleEntries do
+        self:_removeEntry(staleEntries[i])
+    end
+
+    if next(self.entries) == nil then
+        return
+    end
+
+    local effect = self:_ensureEffect()
+    effect.Enabled = hasVisible
+    effect.NearIntensity = hasVisible and maxIntensity or 0
+    effect.FarIntensity = 0
+    effect.InFocusRadius = 0
+    effect.FocusDistance = 0.25 - camera.NearPlaneZ
+end
+
+function frameBlurManager:_ensureBound()
+    if self.bound then
+        return
+    end
+    self.bound = true
+    self:_ensureEffect()
+    RunService:BindToRenderStep(FRAME_BLUR_STEP_NAME, Enum.RenderPriority.Camera.Value + 1, function()
+        frameBlurManager:_step()
+    end)
+end
+
+function frameBlurManager:Create(frame, blurSize, manualOffset)
+    local intensity, padding = frameBlurNormalizeStrength(blurSize)
+    local offset = (typeof(manualOffset) == "Vector2") and manualOffset or Vector2.new(0, 0)
+    local ignoreGuiInset = frameBlurReadIgnoreGuiInset(frame)
+
+    local blurPart = Instance.new("Part")
+    blurPart.Name = "UnitedUI_BlurPart"
+    blurPart.Size = Vector3.new(1, 1, 1) * FRAME_BLUR_PART_SIZE
+    blurPart.Anchored = true
+    blurPart.CanCollide = false
+    blurPart.CanTouch = false
+    pcall(function()
+        blurPart.CanQuery = false
+    end)
+    blurPart.Material = Enum.Material.Glass
+    blurPart.Transparency = FRAME_BLUR_PART_TRANSPARENCY
+    blurPart.Parent = workspace.CurrentCamera
+
+    local mesh = Instance.new("BlockMesh")
+    mesh.Parent = blurPart
+
+    local entry = {
+        frame = frame,
+        part = blurPart,
+        mesh = mesh,
+        enabled = true,
+        ignoreGuiInset = ignoreGuiInset,
+        coreGuiInsetCompensation = ignoreGuiInset and frameBlurIsDescendantOf(frame, CoreGui),
+        manualOffset = offset,
+        intensity = intensity,
+        padding = padding,
+    }
+    self.entries[entry] = true
+    self:_ensureBound()
+
+    local handle = {}
+
+    function handle:SetEnabled(enabled)
+        entry.enabled = enabled == true
+        if not entry.enabled and entry.part then
+            entry.part.Transparency = 1
+        end
+    end
+
+    function handle:SetStrength(newBlurSize)
+        local newIntensity, newPadding = frameBlurNormalizeStrength(newBlurSize)
+        entry.intensity = newIntensity
+        entry.padding = newPadding
+    end
+
+    function handle:SetOffset(newOffset)
+        if typeof(newOffset) == "Vector2" then
+            entry.manualOffset = newOffset
+        end
+    end
+
+    function handle:Destroy()
+        frameBlurManager:_removeEntry(entry)
+    end
+
+    return handle
+end
+
 local NOTIF_MODE_COLORS = {
     Info = Color3.fromRGB(60, 60, 60),
     Information = Color3.fromRGB(60, 60, 60),
@@ -1658,38 +1915,6 @@ local notifQueueRunning = false
 local notifQueueGap = 0.25
 local notifViewportConn = nil
 local layoutNotifications
-local sharedWindowBlur = nil
-local sharedWindowBlurUsers = 0
-
-local function retainWindowBlur(blurSize)
-    local size = math.clamp(tonumber(blurSize) or 16, 0, 56)
-    if not sharedWindowBlur or not sharedWindowBlur.Parent then
-        sharedWindowBlur = make("BlurEffect", {
-            Name = "UnitedUI_WindowBlur",
-            Size = size,
-            Enabled = true,
-            Parent = Lighting,
-        })
-    end
-    sharedWindowBlurUsers += 1
-    if sharedWindowBlur.Size < size then
-        sharedWindowBlur.Size = size
-    end
-    sharedWindowBlur.Enabled = true
-end
-
-local function releaseWindowBlur()
-    if sharedWindowBlurUsers > 0 then
-        sharedWindowBlurUsers -= 1
-    end
-    if sharedWindowBlurUsers <= 0 then
-        sharedWindowBlurUsers = 0
-        if sharedWindowBlur and sharedWindowBlur.Parent then
-            sharedWindowBlur:Destroy()
-        end
-        sharedWindowBlur = nil
-    end
-end
 
 local function ensureNotifGui()
     if notifGui and notifGui.Parent then
@@ -1828,7 +2053,6 @@ local function createNotificationNow(settings)
         _exiting = false,
     }
 
-    -- New notifications should appear closest to selected corner.
     table.insert(notifByLocation[location], 1, item)
     layoutNotifications(location, true)
     tween(frame, 0.16, {Position = UDim2.new(sideScale, xVisible, 0, frame.Position.Y.Offset)})
@@ -1949,6 +2173,15 @@ function UI.Window(title, width, posX, posY, height, options)
     }
     local backgroundMode = backgroundModeAliases[rawBackgroundMode] or "transparent"
     local blurSize = math.clamp(tonumber(options.BlurSize or options.blurSize) or 16, 0, 56)
+    local blurOffsetX = tonumber(options.BlurOffsetX or options.blurOffsetX) or 0
+    local blurOffsetYRaw = options.BlurOffsetY
+    if blurOffsetYRaw == nil then
+        blurOffsetYRaw = options.blurOffsetY
+    end
+    local blurOffsetY = tonumber(blurOffsetYRaw)
+    if blurOffsetY == nil then
+        blurOffsetY = 2
+    end
 
     local windowBackgroundTransparency = C.WindowAlpha
     local headerBackgroundTransparency = math.min(0.95, C.HeaderAlpha + 0.14)
@@ -2283,42 +2516,127 @@ function UI.Window(title, width, posX, posY, height, options)
         Scale = 1,
         Parent = frame,
     })
+    local dofWindowBlur = nil
     local localWindowBlur = nil
-    local useGlobalWindowBlur = false
+    local blurFallbackVisuals = nil
+    local function buildPseudoBlurFallback(baseOverlay, strength)
+        if not baseOverlay or not baseOverlay.Parent then
+            return nil
+        end
+
+        local normalized = math.clamp((tonumber(strength) or 16) / 56, 0, 1)
+        local visuals = {}
+
+        local frostTop = make("Frame", {
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundColor3 = shiftColor(C.Window, 0.14),
+            BackgroundTransparency = math.clamp(0.90 - (normalized * 0.18), 0.62, 0.90),
+            BorderSizePixel = 0,
+            ZIndex = 1,
+            Parent = baseOverlay,
+        })
+        corner(frostTop, 7)
+        make("UIGradient", {
+            Rotation = 28,
+            Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, shiftColor(C.Window, 0.20)),
+                ColorSequenceKeypoint.new(1, shiftColor(C.Window, -0.03)),
+            }),
+            Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0.00, 0.08),
+                NumberSequenceKeypoint.new(0.45, 0.88),
+                NumberSequenceKeypoint.new(1.00, 0.05),
+            }),
+            Parent = frostTop,
+        })
+        table.insert(visuals, {instance = frostTop, alpha = frostTop.BackgroundTransparency})
+
+        local frostBottom = make("Frame", {
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundColor3 = shiftColor(C.Window, -0.12),
+            BackgroundTransparency = math.clamp(0.94 - (normalized * 0.16), 0.66, 0.94),
+            BorderSizePixel = 0,
+            ZIndex = 1,
+            Parent = baseOverlay,
+        })
+        corner(frostBottom, 7)
+        make("UIGradient", {
+            Rotation = 202,
+            Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, shiftColor(C.Window, -0.20)),
+                ColorSequenceKeypoint.new(1, shiftColor(C.Window, 0.07)),
+            }),
+            Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0.00, 0.20),
+                NumberSequenceKeypoint.new(0.50, 0.92),
+                NumberSequenceKeypoint.new(1.00, 0.20),
+            }),
+            Parent = frostBottom,
+        })
+        table.insert(visuals, {instance = frostBottom, alpha = frostBottom.BackgroundTransparency})
+
+        local scanlines = make("Frame", {
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ClipsDescendants = true,
+            ZIndex = 1,
+            Parent = baseOverlay,
+        })
+        corner(scanlines, 7)
+        local lineCount = math.max(10, math.floor(10 + (normalized * 16)))
+        local lineAlpha = math.clamp(0.95 - (normalized * 0.10), 0.80, 0.95)
+        local lineAccentAlpha = math.clamp(lineAlpha - 0.05, 0.70, 0.92)
+        for i = 1, lineCount do
+            local y = (i - 1) / (lineCount - 1)
+            local line = make("Frame", {
+                Size = UDim2.new(1, 0, 0, 1),
+                Position = UDim2.new(0, 0, y, 0),
+                AnchorPoint = Vector2.new(0, 0.5),
+                BackgroundColor3 = (i % 2 == 0) and shiftColor(C.Window, 0.18) or shiftColor(C.Window, -0.14),
+                BackgroundTransparency = (i % 3 == 0) and lineAccentAlpha or lineAlpha,
+                BorderSizePixel = 0,
+                ZIndex = 1,
+                Parent = scanlines,
+            })
+            table.insert(visuals, {instance = line, alpha = line.BackgroundTransparency})
+        end
+
+        return visuals
+    end
     if backgroundMode == "blurr" then
-        local ok, blurObject = pcall(function()
-            local blur = Instance.new("UIBlur")
-            blur.Size = blurSize
-            blur.Enabled = true
-            blur.Parent = frame
-            return blur
+        local dofOk, dofHandle = pcall(function()
+            return frameBlurManager:Create(frame, blurSize, Vector2.new(blurOffsetX, blurOffsetY))
         end)
-        if ok and blurObject then
-            localWindowBlur = blurObject
+        if dofOk and dofHandle then
+            dofWindowBlur = dofHandle
         else
-            useGlobalWindowBlur = true
+            local ok, blurObject = pcall(function()
+                local blur = Instance.new("UIBlur")
+                blur.Size = blurSize
+                blur.Enabled = true
+                blur.Parent = frame
+                return blur
+            end)
+            if ok and blurObject then
+                localWindowBlur = blurObject
+            elseif blurOverlay then
+                blurOverlay.BackgroundTransparency = math.clamp(0.58 - (blurSize / 160), 0.24, 0.58)
+                blurFallbackVisuals = buildPseudoBlurFallback(blurOverlay, blurSize)
+            end
         end
     end
 
     makeDraggable(top, frame, clampWindowToViewport, connectTracked)
-    local blurEnabledForWindow = false
     local function setWindowBlurEnabled(enabled)
         if backgroundMode ~= "blurr" then
             return
         end
+        if dofWindowBlur and dofWindowBlur.SetEnabled then
+            dofWindowBlur:SetEnabled(enabled == true)
+        end
         if localWindowBlur then
             localWindowBlur.Enabled = enabled == true
-            return
-        end
-        if not useGlobalWindowBlur then
-            return
-        end
-        if enabled and not blurEnabledForWindow then
-            retainWindowBlur(blurSize)
-            blurEnabledForWindow = true
-        elseif (not enabled) and blurEnabledForWindow then
-            releaseWindowBlur()
-            blurEnabledForWindow = false
         end
     end
 
@@ -2360,6 +2678,10 @@ function UI.Window(title, width, posX, posY, height, options)
             activeKeybindCapture = nil
         end
         win._toggleKey = Enum.KeyCode.Unknown
+        if dofWindowBlur and dofWindowBlur.Destroy then
+            dofWindowBlur:Destroy()
+            dofWindowBlur = nil
+        end
         setWindowBlurEnabled(false)
         disconnectTrackedConnections()
     end
@@ -2376,6 +2698,7 @@ function UI.Window(title, width, posX, posY, height, options)
 
     local baseFrameBg = frame.BackgroundTransparency
     local baseBlurOverlay = blurOverlay and blurOverlay.BackgroundTransparency or nil
+    local blurFallbackAlphaBoost = 0.42
     local baseTopBg = top.BackgroundTransparency
     local baseNameText = nameLabel.TextTransparency
     local baseNameShadowText = nameShadow.TextTransparency
@@ -2399,6 +2722,14 @@ function UI.Window(title, width, posX, posY, height, options)
         frame.BackgroundTransparency = math.min(1, baseFrameBg + (0.55 * alpha))
         if blurOverlay then
             blurOverlay.BackgroundTransparency = math.min(1, baseBlurOverlay + (0.35 * alpha))
+        end
+        if blurFallbackVisuals then
+            for i = 1, #blurFallbackVisuals do
+                local visual = blurFallbackVisuals[i]
+                if visual and visual.instance and visual.instance.Parent then
+                    visual.instance.BackgroundTransparency = math.min(1, visual.alpha + (blurFallbackAlphaBoost * alpha))
+                end
+            end
         end
         top.BackgroundTransparency = math.min(1, baseTopBg + (0.45 * alpha))
         nameLabel.TextTransparency = math.min(1, baseNameText + (0.78 * alpha))
@@ -2874,7 +3205,6 @@ function UI.Window(title, width, posX, posY, height, options)
         return tab
     end
 
-    -- Backward compatibility: controls are added to first container of active tab.
     local function ensureDefaultContainer()
         if not win._defaultContainerApi then
             if #win._tabs == 0 then
@@ -3031,7 +3361,6 @@ function UI.Window(title, width, posX, posY, height, options)
         end
     end
 
-    -- Legacy Toolbar -> maps to tabs and returns old-like API.
     function win:Toolbar(tabNames, callback)
         local created = {}
         for _, n in ipairs(tabNames or {}) do
@@ -3076,7 +3405,6 @@ function UI.Window(title, width, posX, posY, height, options)
         }
     end
 
-    -- Legacy Grid: rendered as rows of buttons in current container.
     function win:Grid(columns, items)
         columns = math.max(columns or 1, 1)
         local api = ensureDefaultContainer()
