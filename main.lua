@@ -756,7 +756,7 @@ local function createElementAPI(targetScroll, connectFn)
                 ob.MouseLeave:Connect(function() tween(ob, 0.08, {BackgroundColor3 = C.Button}) end)
                 ob.MouseButton1Click:Connect(function()
                     setSelected(opt, true)
-                    setOpen(false)
+                    -- setOpen(false); -- disabled due to obfuscation errors
                 end)
                 table.insert(optionButtons, ob)
             end
