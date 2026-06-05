@@ -2149,15 +2149,15 @@ end
 
 UI.Notify = UI.Notification
 
-function UI.Window(title, width, posX, posY, height, options)
+function UI.Window(title, width, posX, posY, height, options,minx,miny)
     options = options or {}
     width = width or 760
     posX = posX or 120
     posY = posY or 80
     height = height or 500
 
-    local minWidth = 520
-    local minHeight = 340
+    local minWidth = minx or 140
+    local minHeight = miny or 140
     local maxWidthPad = 8
     local maxHeightPad = 8
     local saveConfigs = options.SaveConfigs == true
